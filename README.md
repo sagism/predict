@@ -16,8 +16,11 @@ Just load the html file in a modern browser.
 
 Some sample data is provided in the page, but you can upload your own data from a csv file using the following format:
 
+```
   yyyy-mm-dd,remaining
   yyyy-mm-dd,remaining
+  ...
+```
 
 See sample file Project_X.csv
 
