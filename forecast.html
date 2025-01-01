@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<!--
+  This self-contained file let's you forecast a project/release using historical data.
+  You can load the historical data as a csv file, each row containing two fields:
+  date: a date which can be parsed using javascript Date.parse()
+  remaining: a numeric value representing the remaining work at that date
+  The file should contain no other lines (e.g. header, comments)
+
+  This program uses two separate models for forecasting:
+  1. Linear extrapolation
+  2. Monte Carlo simulation
+
+  This program is released under the CC-SA license by Sagi Smolarski
+  You are free to use it, and modify it and even re-distribute it, as long as
+  you keep this attribution as-is. If you do modify and/or redistribute it,
+  you cannot assign a more restrictive licensing.
+
+  Details:
+  - W3C File Api: https://www.w3.org/TR/FileAPI/
+  - Browsers compatibility: https://caniuse.com/fileapi 
+  - https://gramener.github.io/d3js-playbook/
+-->
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+  
+    <title>Ugile Predict</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+    <script src="https://unpkg.com/d3-regression@1.3.10/dist/d3-regression.min.js"></script>
+    <script src="https://d3js.org/d3.v6.js"></script>
+
+    <style>
+      .tooltip {
+        position: absolute;
+        pointer-events: none;
+        background: #8894d0;
+        padding-left: 7px;
+        padding-right: 7px;
+        border-radius: 3px;
+        color: #fff;
+        transition: opacity 0.3s, visibility 0.3s;
+      }
+    </style>
+    
+  </head>
+  <body>
+
+    <section class="section">
+      <div class="container">
+        <h1 class="title">
+          Project Forecasting
+        </h1>
+        <p class="subtitle">
+          Upload you project's data to forecast its completion date
+        </p>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="container">
+
+    <div class="columns">
+      <div class="column is-one-quarter">
+
+        <div id="data">
+          <h2 class="title is-4">Historical data</h2>
+          <div id="uploader">
+            <button class="button is-primary" id="pick-file">load historical data</button>
+          </div>
+          <div id="upload-errors">
+
+          </div>
+          <table id="data-table" class="table is-striped is-narrow is-hoverable">
+            <thead>
+              <tr>
+                <td>Date</td><td>Remaining</td>
+              </tr>
+            </thead>
+            <tbody id="data-rows">
+              <!-- sample data -->
+              <tr><td><input type="date" value="2023-05-07"/></td><td><input type="number" value="677"/></tr>
+              <tr><td><input type="date" value="2023-05-14"/></td><td><input type="number" value="675"/></tr>
+              <tr><td><input type="date" value="2023-05-21"/></td><td><input type="number" value="670"/></tr>
+              <tr><td><input type="date" value="2023-05-28"/></td><td><input type="number" value="663"/></tr>
+              <tr><td><input type="date" value="2023-06-04"/></td><td><input type="number" value="663"/></tr>
+              <tr><td><input type="date" value="2023-06-11"/></td><td><input type="number" value="655"/></tr>
+              <tr><td><input type="date" value="2023-06-18"/></td><td><input type="number" value="638"/></tr>
+            </tbody>
+          </table>
+        </div>
+
+        </div> 
+
+        <div class="column" id="simulation">
+          <h2 class="title is-4">Forecast</h2>
+          <div id="controls">
+            <button class="button is-primary" onclick="simulate()">Simulate</button>
+          </div>
+          <div id="messages"></div>
+          <div id="exceptions" class="is-title is-4 has-text-danger"></div>
+
+          <nav class="level">
+            <div class="level-item has-text-centered">
+              <div id="monte-carlo-distribution"></div>
+            </div>
+          </nav>
+
+          <nav class="level">
+            <div class="level-item has-text-centered">
+              <div id="stats"></div>
+            </div>
+          </nav>
+
+          <hr/>
+          <nav class="level">
+            <div class="level-item has-text-centered">
+              <div id="burndown-stats"></div>
+            </div>
+          </nav>
+          <div id="burndown-chart"></div>
+          <nav class="level">
+            <div class="level-item has-text-centered">
+              <div id="burndown-stats"></div>
+            </div>
+          </nav>
+
+
+          <hr/>
+          <div id="mega-chart"></div>
+        </div>
+
+      </div>
+
+    </div>
+  </section>
+
+
+    <script>
+      const ONE_DAY = new Date('2023-11-15') - new Date('2023-11-14')
+      class NotConvergingError extends Error {}
+
+      function to_date(since, periods, period_days) {
+        return new Date(since.getTime() + (periods * period_days * ONE_DAY))
+      }
+
+      function to_datestr(d) {
+        return d.toLocaleDateString("en-US", {month: "short", day: "numeric", year: "numeric"})
+      }
+
+      document.addEventListener('DOMContentLoaded', function() {
+
+        function init() {
+            var isSupported = ( window.FileReader && window.File && window.FileList && window.Blob )
+            if (!isSupported) {
+                alert("This browser doesn't support the File API. You won't be able to load data. Please use a more recent browser which provides support for this feature");
+                return;
+            }
+            let fileHandle;
+
+            const options = {
+              types: [
+                {
+                  description: "comma-separated-file",
+                  accept: {
+                    "text/csv": ".csv",
+                  },
+                },
+              ],
+              excludeAcceptAllOption: true,
+              };
+ 
+            document.querySelector("#pick-file").onclick = async () => {
+            [fileHandle] = await window.showOpenFilePicker(options);
+            
+            const file = await fileHandle.getFile();
+            const content = await file.text();
+            
+            // console.log(content);
+
+            let rows = d3.csvParseRows(content);
+
+            let elem = document.getElementById('data-rows')
+
+            let new_html = "";
+            line_num = 0
+            for (var row of rows) {
+              line_num++
+              // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/parse#non-standard_date_strings
+              // Check that we can parse rows in the uploaded data into a date and a number
+              let d = Date.parse(row[0]);
+              let v = parseFloat(row[1]);
+              // if (line === "") continue;
+              if (isNaN(d) | isNaN(v)) {
+                console.log(`ERROR PARSING LINE [${line}]`)
+                document.getElementById("upload-errors").innerHTML += `line #${line_num} [${line}]`;
+              } else {
+                // console.log(d,v)
+                // console.log(`date: ${row[0]}, remaining:${row[1]}`)
+                new_html += `<tr><td><input type="date" value="${row[0]}"/></td><td><input type="number" value="${row[1]}"/></tr>`
+                // new_html += `<tr><td>${row[0]}</td><td>${row[1]}</td></tr>`
+                // console.log(`successfully parsed line ${line_num}`)
+              }
+              
+            }
+            elem.innerHTML = new_html
+          }            // document.getElementById("sampleFile").addEventListener("change", handleThisFile);
+        }
+        init();
+
+        // Setup delete button
+        (document.querySelectorAll('.notification .delete') || []).forEach(($delete) => {
+              const $notification = $delete.parentNode;
+
+              $delete.addEventListener('click', () => {
+                $notification.parentNode.removeChild($notification);
+              });
+        });
+
+      });
+
+      function one_experiment(values, start, target) {
+        const MAX_STEPS = 10_000;
+        var remaining = start;
+        var iterations = 0;
+        while (remaining > target) {
+          let delta = values[Math.floor(Math.random()*values.length)];
+          remaining += delta;
+          iterations++;
+          if (iterations > MAX_STEPS) {
+            throw new NotConvergingError()
+          }
+        }
+        return iterations;
+      }
+
+      function dateline(svg, data, x, text, height, color, top_height_ratio) {
+        const selector = `${Math.round(1_000_000*Math.random())}`
+
+        const top_margin = top_height_ratio * height;
+        const offset = 0.125 * height;
+        const vertex_end = offset + top_margin;
+
+        // Riser with background
+        svg.selectAll(`vline${selector}.bg`)
+          .data(data)
+          .enter()
+          .append("line")
+            .attr("fill", "none")
+            .attr("stroke", 'white')
+            .attr("stroke-width", 4.5)
+            .attr('stroke-opacity', 0.7)
+            .attr("x1", function(d) { return x(d.date) })
+            .attr("x2", function(d) { return x(d.date) })
+            .attr("y1", vertex_end )
+            .attr("y2", height )
+
+        svg.selectAll(`vline${selector}`)
+          .data(data)
+          .enter()
+          .append("line")
+            .attr("fill", "none")
+            .attr("stroke", color)
+            .attr("stroke-width", 2.5)
+            .style("stroke-dasharray", ("3, 3")) 
+            .attr("x1", function(d) { return x(d.date) })
+            .attr("x2", function(d) { return x(d.date) })
+            .attr("y1", vertex_end)
+            .attr("y2", height )
+
+        svg.selectAll(`vline${selector}.diag.bg`)
+          .data(data)
+          .enter()
+          .append("line")
+            .attr("fill", "none")
+            .attr("stroke", "white")
+            .attr("stroke-width", 4.5)
+            .attr('stroke-opacity', 0.7)
+            .attr("x1", function(d) { return x(d.date) - offset })
+            .attr("x2", function(d) { return x(d.date)  })
+            .attr("y1", top_margin )
+            .attr("y2", vertex_end )
+
+        svg.selectAll(`vline${selector}.diag`)
+          .data(data)
+          .enter()
+          .append("line")
+            .attr("fill", "none")
+            .attr("stroke", color)
+            .attr("stroke-width", 2.5)
+            .style("stroke-dasharray", ("3, 3")) 
+            .attr("x1", function(d) { return x(d.date) - offset })
+            .attr("x2", function(d) { return x(d.date)  })
+            .attr("y1", top_margin )
+            .attr("y2", vertex_end )
+
+        svg.selectAll(`vline${selector}.text`)
+          .data(data)
+          .enter()
+          .append('text')
+          .text(text)
+          .attr('fill', color)
+          .attr('x', d=>(x(d.date) - offset - 10 ))
+          .attr("text-anchor", "end")
+          .attr('y', top_margin ) 
+          .style("text-shadow", "1px 1px 0 #fff")
+  
+        
+        // Marker double circle
+        svg.selectAll(`vline${selector}.circle1`)
+          .data(data)
+          .enter()
+          .append("circle")
+            .attr("fill", color)
+            .attr("stroke", "none")
+            .attr("cx", function(d) { return x(d.date) })
+            .attr("cy", height)
+            .attr("r", 10)
+            .attr('fill-opacity', 0.2)
+
+        svg.selectAll(`vline${selector}.circle2`)
+          .data(data)
+          .enter()
+          .append("circle")
+            .attr("fill", color)
+            .attr("stroke", "none")
+            .attr("cx", function(d) { return x(d.date) })
+            .attr("cy", height)
+            .attr("r", 3)
+      }
+
+      function draw_all(regression, monte_carlo) {
+        const doc_div = document.getElementById("mega-chart")
+        const d3_div = d3.select("#mega-chart")
+
+        monte_carlo.dates_data = null;
+        if (monte_carlo && monte_carlo.data) {
+          const first_date = regression.data[regression.data.length-1].date
+          // console.log('Monte Carlo data:')
+          // console.log(monte_carlo.data)
+          // console.log(`first_date : ${first_date}`)
+          // console.log(`monte_carlo.period_days : ${monte_carlo.period_days}`)
+          
+          monte_carlo.dates_data = monte_carlo.data.map(x => to_date(first_date, x, monte_carlo.period_days))
+          // console.log('Monte Carlo dates data:')
+          // console.log(monte_carlo.dates_data)
+
+          // monte_carlo.expected = to_date(first_date, d3.mean(monte_carlo.data), monte_carlo.period_days)
+        }
+
+        var div_width = doc_div.offsetWidth
+
+        d3_div.select("svg").remove()
+
+        var tip = d3.select("body").append("div")
+          .attr("class", "tooltip")
+          .style("opacity", 0)
+        
+
+        var margin = {top: 40, right: 30, bottom: 30, left: 60},
+            width = div_width - margin.left - margin.right,
+            height = 400 - margin.top - margin.bottom;
+
+        var svg = d3_div
+          .append("svg")
+            .attr("width", width + margin.left + margin.right)
+            .attr("height", height + margin.top + margin.bottom)
+          .append("g")
+            .attr("transform",
+                  "translate(" + margin.left + "," + margin.top + ")");
+
+        var ypoints_range = [
+          {date: regression.data[0].date},
+          {date: regression.data[regression.data.length-1].date}
+        ]
+        if (regression.forecast) {
+          ypoints_range.push({date: regression.forecast})
+        }
+
+        if (monte_carlo.dates_data) {
+          const last_date = to_date(regression.data[regression.data.length-1].date, d3.max(monte_carlo.data), monte_carlo.period_days) 
+          console.log(`pushing max montecarlo date (${last_date}) to range`)
+          ypoints_range.push({date: last_date})
+        }
+
+        var x = d3.scaleTime()
+          .domain(d3.extent(ypoints_range, function(d) { return d.date; }))
+          .range([ 0, width ]);
+
+        const custom_ticks = false
+        if (custom_ticks) {
+          console.log(`adding tick ${monte_carlo.expected}`)
+          var ticks = x.ticks()
+          ticks.push(monte_carlo.expected)
+          ticks.push(monte_carlo.quantile_5)
+          ticks.push(monte_carlo.quantile_95)
+          svg.append("g")
+          .attr("transform", "translate(0," + height + ")")
+          .call(
+            d3.axisBottom(x)
+              .tickValues(ticks.sort())
+              .tickFormat( // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/DateTimeFormat/DateTimeFormat#options
+              x => x.toLocaleDateString("en-US", {day:"numeric", month: "numeric", year: "2-digit"})
+            )
+            );
+
+        } else {
+
+          svg.append("g")
+          .attr("transform", "translate(0," + height + ")")
+          .call(d3.axisBottom(x));
+        }
+
+        // Add Y axis
+        var y = d3.scaleLinear()
+          .domain([0, d3.max(regression.data, function(d) { return +d.value; })])
+          .range([ height, 0 ])
+          .nice();
+
+        svg.append("g")
+          .call(d3.axisLeft(y));
+
+        // Grid
+        svg.selectAll("line.horizontalGrid")
+            .data(y.ticks(4))
+            .enter()
+            .append("line")
+                .attr("class", "horizontalGrid")
+                .attr("x1", 0)
+                .attr("x2", width)
+                .attr("y1", function(d){ return y(d);})
+                .attr("y2", function(d){ return y(d);})
+                .attr("stroke", "grey")
+                .attr("stroke-width", "0.2px")
+                .attr("shape-rendering", "crispEdges")
+
+        // Add the history line
+        svg.append("path")
+          .datum(regression.data)
+          .attr("fill", "none")
+          .attr("stroke", "magenta")
+          .attr("stroke-width", 1.5)
+          .attr("d", d3.line()
+            .x(function(d) { return x(d.date) })
+            .y(function(d) { return y(d.value) })
+            )
+
+        var circles = svg.selectAll("historyCircles")
+          .data(regression.data)
+          .enter()
+          .append("circle")
+            .attr("fill", "magenta")
+            .attr("stroke", "none")
+            .attr("cx", function(d) { return x(d.date) })
+            .attr("cy", function(d) { return y(d.value) })
+            .attr("r", 3)
+
+
+          circles.on("mouseover", function(d) {
+            tip.style("opacity", 1)
+              .html(`${to_datestr(d.target.__data__.date)} : ${d.target.__data__.value}`)
+              .style("left", (d.pageX-35) + "px")
+              .style("top", (d.pageY-35) + "px")
+            })
+            .on("mouseout", function(d) {
+              tip.style("opacity", 0)
+            })
+
+            // trying to implmement hover. so far no luck
+            // .on('mouseover', function (d, i) {
+            //     d3.select(this).transition()
+            //         .duration('50')
+            //         .attr('opacity', '.2') })
+            // .on('mouseout', function (d, i) {
+            //     d3.select(this).transition()
+            //         .duration('50')
+            //         .attr('opacity', '1')})
+
+        
+
+
+        // Histogram
+        // ----------
+        // set the parameters for the histogram
+        const histogram = d3.histogram()
+              .value(function(d) { return d; })   // I need to give the vector of value
+              .domain(x.domain())  // then the domain of the graphic
+              .thresholds(x.ticks(140)); // then the numbers of bins
+
+        const bins = histogram(monte_carlo.dates_data);
+
+        // console.log('Monte carlo bins:')
+        // console.log(bins);
+
+        // Y axis: scale and draw:
+        const yhist = d3.scaleLinear()
+            .range([height, 0]);
+        yhist.domain([0, d3.max(bins, function(d) { return d.length; })]);   // d3.hist has to be called before the Y axis obviously
+
+        // Append histogram bar rectangles to the svg element
+        svg.selectAll("rect")
+            .data(bins)
+            .join("rect")
+            .attr("x", 1)
+            .attr("transform", function(d) { return `translate(${x(d.x0)} , ${yhist(d.length)})`})
+            .attr("width", function(d) { return Math.max(0, x(d.x1) - x(d.x0) - 1) })
+            .attr("height", function(d) { return height - yhist(d.length); })
+            .style("fill", "#69b3a2")
+          
+        // 90% confidence background
+        svg   
+            .append("rect")
+            .attr("x", x(monte_carlo.quantile_5))
+            .attr("y", 0)
+            .attr("width", x(monte_carlo.quantile_95)-x(monte_carlo.quantile_5))
+            .attr("height", height)
+            .style("fill", "#69b3a2")
+            .attr('fill-opacity', 0.2)
+
+        svg   
+            .append("line")
+            .attr("x1", x(monte_carlo.quantile_5))
+            .attr("x2", x(monte_carlo.quantile_5))
+            .attr("y1", 0)
+            .attr("y2", height)
+            .style("stroke", "#69b3a2")
+            .style("stroke-width", 3)
+            .attr('stroke-opacity', 0.4)
+            .style("stroke-dasharray", ("5, 3, 2"))
+        
+        svg   
+            .append("line")
+            .attr("x1", x(monte_carlo.quantile_95))
+            .attr("x2", x(monte_carlo.quantile_95))
+            .attr("y1", 0)
+            .attr("y2", height)
+            .style("stroke", "#69b3a2")
+            .style("stroke-width", 3)
+            .attr('stroke-opacity', 0.4)
+            .style("stroke-dasharray", ("5, 3, 2"))
+
+        svg.append('text')
+          .text('<5%---')
+          .attr('fill', "#69b3a2")
+          .attr('x', x(monte_carlo.quantile_5))
+          .attr("text-anchor", "start")
+          .style("font-size", "0.7em")
+          .attr('y', 0.05*height ) 
+          .style("text-shadow", "0.5px 0.5px 0 #000")
+
+        svg.append('text')
+          .text('---95%>')
+          .attr('fill', "#69b3a2")
+          .attr('x', x(monte_carlo.quantile_95))
+          .attr("text-anchor", "end")
+          .attr('y', 0.05*height ) 
+          .style("font-size", "0.7em")
+          .style("text-shadow", "0.5px 0.5px 0 #000")
+
+      
+
+        dateline(svg, [{date:monte_carlo.expected}], x, `monte carlo: ${to_datestr(monte_carlo.expected)}`, height, "blue", 0.15)
+        // dateline(svg, [{date:monte_carlo.quantile_5}], x, `monte carlo: ${to_datestr(monte_carlo.quantile_5)}`, height, "blue", 0.2)
+        // dateline(svg, [{date:monte_carlo.quantile_95}], x, `monte carlo: ${to_datestr(monte_carlo.quantile_95)}`, height, "blue", 0.1)
+
+        // Regression line
+        const regression_key_points = [
+          {date: regression.data[0].date, value: regression.predict(regression.data[0].date)},
+          {date: regression.forecast, value: 0}
+        ]
+
+        // Regression line
+        svg.append("path")
+          .datum(regression_key_points)
+          .attr("fill", "none")
+          .attr("stroke", "magenta")
+          .style("stroke-dasharray", ("3, 3")) 
+          .attr("stroke-width", 1.5)
+          .attr("d", d3.line()
+            .x(function(d) { return x(d.date) })
+            .y(function(d) { return y(d.value) })
+            )
+
+        // Regression forecast line
+        dateline(svg, [{date:regression.forecast}], x, "regression: " + to_datestr(new Date(regression.forecast)), height, "magenta", 0.35)
+
+        // Chart title
+        svg.append("text")
+            .attr("x", (width / 2))             
+            .attr("y", 0 - (margin.top / 2))
+            .attr("text-anchor", "middle")  
+            .style("font-size", "20px")
+            .style("font-weight", "bold")
+            .text("Combined Forecast");
+      }
+
+      function draw_regression(data, predict, forecast) {
+        // set the dimensions and margins of the graph
+        var div_width = document.getElementById("burndown-chart").offsetWidth
+
+        const regression_div = d3.select("#burndown-chart")
+        regression_div.select("svg").remove();
+
+        var margin = {top: 40, right: 30, bottom: 30, left: 60},
+            width = div_width - margin.left - margin.right,
+            height = 400 - margin.top - margin.bottom;
+
+        // append the svg object to the body of the page
+        var svg = regression_div
+          .append("svg")
+            .attr("width", width + margin.left + margin.right)
+            .attr("height", height + margin.top + margin.bottom)
+          .append("g")
+            .attr("transform",
+                  "translate(" + margin.left + "," + margin.top + ")");
+
+        // Add X axis --> it is a date format
+        // We need to take into account the forecast date as well
+        var ypoints_range = [
+          {date: data[0].date},
+          {date: data[data.length-1].date}
+        ]
+        if (forecast) {
+          ypoints_range.push({date: forecast})
+        }
+
+        var x = d3.scaleTime()
+          .domain(d3.extent(ypoints_range, function(d) { return d.date; }))
+          .range([ 0, width ]);
+        svg.append("g")
+          .attr("transform", "translate(0," + height + ")")
+          .call(d3.axisBottom(x));
+
+        // Add Y axis
+        var y = d3.scaleLinear()
+          .domain([0, d3.max(data, function(d) { return +d.value; })])
+          .range([ height, 0 ])
+          .nice();
+
+        svg.append("g")
+          .call(d3.axisLeft(y));
+
+        // Add the history line
+        svg.append("path")
+          .datum(data)
+          .attr("fill", "none")
+          .attr("stroke", "magenta")
+          .attr("stroke-width", 1.5)
+          .attr("d", d3.line()
+            .x(function(d) { return x(d.date) })
+            .y(function(d) { return y(d.value) })
+            )
+
+        svg.selectAll("historyCircles")
+          .data(data)
+          .enter()
+          .append("circle")
+            .attr("fill", "magenta")
+            .attr("stroke", "none")
+            .attr("cx", function(d) { return x(d.date) })
+            .attr("cy", function(d) { return y(d.value) })
+            .attr("r", 3)
+
+        // regression line
+        const regression_key_points = [
+          {date: data[0].date, value: predict(data[0].date)},
+          {date: forecast, value: 0}
+        ]
+        svg.append("path")
+          .datum(regression_key_points)
+          .attr("fill", "none")
+          .attr("stroke", "magenta")
+          .style("stroke-dasharray", ("3, 3")) 
+          .attr("stroke-width", 1.5)
+          .attr("d", d3.line()
+            .x(function(d) { return x(d.date) })
+            .y(function(d) { return y(d.value) })
+            )
+
+        // regression points
+        svg.selectAll("regressionCircles")
+          .data([{date:forecast, value:0}])
+          .enter()
+          .append("circle")
+            .attr("fill", "blue")
+            .attr("stroke", "none")
+            .attr("cx", function(d) { return x(d.date) })
+            .attr("cy", function(d) { return y(d.value) })
+            .attr("r", 3)
+
+        // Chart title
+        svg.append("text")
+            .attr("x", (width / 2))             
+            .attr("y", 0 - (margin.top / 2))
+            .attr("text-anchor", "middle")  
+            .style("font-size", "20px")
+            .style("font-weight", "bold")
+            .text("Linear Extrapolation");
+      }
+
+      function draw_histogram(data, start_time, period_days, left_date) {
+        const margin = {top: 30, right: 30, bottom: 30, left: 40},
+          width = 460 - margin.left - margin.right,
+          height = 400 - margin.top - margin.bottom;
+
+        // append the svg object to the body of the page
+        const results_div = d3.select("#monte-carlo-distribution")
+
+        // clear it (in case we are generating again)
+        results_div.select("svg").remove();
+
+        const svg = results_div
+          .append("svg")
+            .attr("width", width + margin.left + margin.right)
+            .attr("height", height + margin.top + margin.bottom)
+          .append("g")
+            .attr("transform",
+                  `translate(${margin.left},${margin.top})`);
+
+          const x = d3.scaleLinear()
+              // .domain([d3.min(data), d3.max(data)])
+              .domain([left_date, d3.max(data)])
+              .range([0, width])
+              ;
+
+          // add specific ticks on key dates
+          var ticks = x.ticks()
+          new_ticks = [ticks[0], d3.quantile(data, 0.05), d3.mean(data), d3.quantile(data, 0.95), ticks[ticks.length-1]]
+                        
+          svg.append("g")
+              .attr("transform", `translate(0, ${height})`)
+              .call(d3.axisBottom(x)
+                .tickValues(new_ticks)
+                .tickFormat(x => {
+                    // let d = new Date(start_time.getTime() + (x * period_days * ONE_DAY))
+                    return to_date(start_time, x, period_days).toLocaleDateString("en-US")
+                  })
+              );
+
+          svg.selectAll("text")  
+            .style("text-anchor", "end")
+            .attr("dx", "1em")
+            .attr("dy", "1em")
+            .attr("transform", "rotate(-15)");
+
+          // set the parameters for the histogram
+          const histogram = d3.histogram()
+              .value(function(d) { return d; })   // I need to give the vector of value
+              .domain(x.domain())  // then the domain of the graphic
+              .thresholds(x.ticks(70)); // then the numbers of bins
+
+          
+
+
+          // And apply this function to data to get the bins
+          const bins = histogram(data);
+          
+          // Y axis: scale and draw:
+          const y = d3.scaleLinear()
+              .range([height, 0]);
+              y.domain([0, d3.max(bins, function(d) { return d.length; })]);   // d3.hist has to be called before the Y axis obviously
+          svg.append("g")
+              .call(d3.axisLeft(y));
+
+          // append the bar rectangles to the svg element
+          svg.selectAll("rect")
+              .data(bins)
+              .join("rect")
+                .attr("x", 1)
+            .attr("transform", function(d) { return `translate(${x(d.x0)} , ${y(d.length)})`})
+                .attr("width", function(d) { return Math.max(0, x(d.x1) - x(d.x0) -1)})
+                .attr("height", function(d) { return height - y(d.length); })
+                .style("fill", "#69b3a2")
+          
+          // Chart Title
+          svg.append("text")
+            .attr("x", (width / 2))             
+            .attr("y", 0 - (margin.top / 2))
+            .attr("text-anchor", "middle")  
+            .style("font-size", "20px")
+            .style("font-weight", "bold")
+            .text("Monte Carlo Distribution");
+
+      }
+
+      function simulate() {
+
+        const exceptions = document.getElementById("exceptions")
+        exceptions.innerHTML = ""
+
+        // 1. Get all data points from the document
+        var table = document.getElementById("data-rows");
+        var dates = [];
+        var values = [];
+        var data = [];
+
+        for (let row of table.rows) {
+            let date = row.cells[0].children[0].value;
+            let value = row.cells[1].children[0].value;
+            dates.push(date)
+            values.push(value)
+            data.push({date: new Date(date), value: parseFloat(value) });
+            // console.log(date, value)
+        }
+        let scope = parseFloat(values[values.length-1])
+
+        // Create series of changes in remaining
+        let value_deltas = values.slice(1).map((x,i)=> x-values[i]);
+        // console.log("deltas:")
+        // console.log(value_deltas)
+        // console.log("--------------------")
+
+
+        // Show regression
+        // ---------------
+
+        const regression = d3.regressionLinear()
+          .x(data => data.date)
+          .y(data => data.value)
+        const predict = regression(data)
+        // console.log('Regression:')
+        // console.log(`a: ${predict.a}, b:${predict.b}`)
+        
+        // adjust regression to start on last data point
+        const regression_y_on_last_day = predict.predict(data[data.length-1].date)
+        const actual_remaining_on_last_day = data[data.length-1].value
+        const y_correction = actual_remaining_on_last_day - regression_y_on_last_day
+
+        // console.log(`y_correction: ${y_correction} (last remaining: ${actual_remaining_on_last_day}, regression_y_on_last_day: ${regression_y_on_last_day})`)
+
+        function calibrated_predict(x) {
+          return predict.predict(x) + y_correction
+        }
+
+        // calculate x for y=0 : the forecast date
+        if (predict.a>0) {
+          // console.log('Progress is not converging')
+          forecast = null
+          exceptions.innerHTML += "<div>Regression does not converge</div>"
+        } else {
+          forecast = -1 * (predict.b+y_correction)/predict.a
+          // console.log(`regression forecast: ${forecast} = ${new Date(forecast)}`)
+          const burndown_stats = document.getElementById('burndown-stats')
+          burndown_stats.innerHTML = `Regression forecast: <strong>${to_datestr(new Date(forecast))}</strong>`
+        }
+
+        draw_regression(data, calibrated_predict, forecast)
+
+        // 2. Run experiments
+        let n_experiments = 10000;
+        let results = [];
+        
+        let outcomes = [];
+        for(var iexperiment = 1; iexperiment<n_experiments; iexperiment++){
+          try {
+            outcomes.push(one_experiment(value_deltas, scope, 0)) 
+          } catch (err) {
+            if (err.constructor === NotConvergingError) {
+              // console.log('Simulation does not converge')
+              console.log(err.message)
+              exceptions.innerHTML += "<div>Monte Carlo does not converge</div>"
+              return
+            } else {
+              console.error(err.message)   
+            }
+          }
+        }
+
+        // the results we get are # of periods needed to complete.
+        // we need to translate this into dates.
+        // for this we need the period duration (we can compute as diff between
+        // last date and previous date, but should verify this is consistent over
+        // all dates)
+        // then we add period_duration * periods to the last date
+        // console.log('dates:')
+        let last_date = new Date(dates[dates.length-1])
+        let prev_date = new Date(dates[dates.length-2])
+
+        // TODO: validate equidistant dates
+        
+        let period_days = (last_date - prev_date)/ONE_DAY
+        // console.log((last_date - prev_date)/ONE_DAY)   
+        // console.log(outcomes);
+
+
+        let stats_div = document.getElementById("stats")
+
+        let stats_html = '<h1 class="title is-5">Monte Carlo Forecast</h1><table class="table"><tbody>'
+
+        let mean_duration = d3.mean(outcomes)
+        let mean_date = to_date(last_date, mean_duration, period_days)
+        stats_html += `<tr><td>forecast date</td><td>${to_datestr(mean_date)}</td></tr>`
+
+        let min_date = to_date(last_date, d3.min(outcomes), period_days)
+        stats_html += `<tr><td>best case date</td><td>${to_datestr(min_date)}</td></tr>`
+
+        let max_date = to_date(last_date, d3.max(outcomes), period_days)
+        stats_html += `<tr><td>worst case date</td><td>${to_datestr(max_date)}</td></tr>`
+
+        stats_html += '</tbody></table>'
+
+        let quantile_5 = to_date(last_date, d3.quantile(outcomes, 0.05), period_days)
+        let quantile_95 = to_date(last_date, d3.quantile(outcomes, 0.95), period_days)
+
+        stats_html += `<span class="">90% probability that completion date will be from <strong>${to_datestr(quantile_5)}</strong> to <strong>${to_datestr(quantile_95)}</strong></span>`
+        stats_div.innerHTML = stats_html
+
+
+        var regression_data = {
+          data: data, 
+          predict: calibrated_predict, 
+          forecast: forecast
+        }
+
+        var monte_carlo_data = {
+          data: outcomes,
+          period_days: period_days,
+          expected: mean_date,
+          quantile_5: quantile_5,
+          quantile_95: quantile_95
+        }
+
+        draw_histogram(outcomes, last_date, period_days, 0);
+        draw_all(regression_data, monte_carlo_data)
+
+      }
+    </script>
+
+    <!-- <div class="notification is-success pop-up">
+      <button class="delete"></button>
+      Simulation of events complete
+    </div> -->
+  </body>
+
+
+</html>
