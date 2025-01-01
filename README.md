@@ -17,3 +17,10 @@ Some sample data is provided in the page, but you can upload your own data from 
   yyyy-mm-dd,remaining
 
 See sample file under data
+
+# License
+
+Creative-Commons 1.0
+
+
+Attribution to Sagi Smolarski - sagism@gmail.com
