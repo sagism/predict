@@ -8,7 +8,7 @@ Using "remaining" data points, forecast completion date:
 Two methods are used to forecast:
 
   1. Linear regression - Create a best-fit line and see when it gets to zero (full content completed)
-  2. Monte Carlo - Roll the dice daily on completion for that day till all content is completed. Do this many times and generate a distribution of completion dates
+  2. Monte Carlo - Roll the dice daily on completion for that day (based on historical completion data points) till all content is completed. Do this many times and generate a distribution of completion dates
 
 # Using
 
