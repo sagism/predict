@@ -11,16 +11,18 @@ Two methods are used to forecast:
   2. Monte Carlo - Roll the dice daily on completion for that day till all content is completed. Do this many times and generate a distribution of completion dates
 
 # Using
+
+Just load the html file in a modern browser.
+
 Some sample data is provided in the page, but you can upload your own data from a csv file using the following format:
 
   yyyy-mm-dd,remaining
   yyyy-mm-dd,remaining
 
-See sample file under data
+See sample file Project_X.csv
 
 # License
 
 Creative-Commons 1.0
-
 
 Attribution to Sagi Smolarski - sagism@gmail.com
